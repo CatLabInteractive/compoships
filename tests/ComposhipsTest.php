@@ -154,10 +154,6 @@ class ComposhipsTest extends TestCase
 
     public function testHas()
     {
-        if (getLaravelVersion() <= 5.6 && getPHPVersion() >= 7.3) {
-            $this->markTestIncomplete('This test is broken on laravel 5.6 with PHP 7.3 and earlier!');
-        }
-
         $allocations = Allocation::has('trackingTasks')
             ->get()
             ->toArray();
@@ -170,10 +166,6 @@ class ComposhipsTest extends TestCase
      */
     public function testWhereHas()
     {
-        if (getLaravelVersion() <= 5.6 && getPHPVersion() >= 7.3) {
-            $this->markTestIncomplete('This test is broken on laravel 5.6 with PHP 7.3 and earlier!');
-        }
-
         $allocations = Allocation::wherehas('trackingTasks')
             ->get()
             ->toArray();
@@ -190,10 +182,6 @@ class ComposhipsTest extends TestCase
 
     public function testWhereHasCallback()
     {
-        if (getLaravelVersion() <= 5.6 && getPHPVersion() >= 7.3) {
-            $this->markTestIncomplete('This test is broken on laravel 5.6 with PHP 7.3 and earlier!');
-        }
-
         $allocations = Allocation::wherehas('trackingTasks', function ($query) {
             $query->where('vehicle_id', 1);
         })
@@ -223,10 +211,6 @@ class ComposhipsTest extends TestCase
 
     public function testHasForSelfRelation()
     {
-        if (getLaravelVersion() <= 5.6 && getPHPVersion() >= 7.3) {
-            $this->markTestIncomplete('This test is broken on laravel 5.6 with PHP 7.3 and earlier!');
-        }
-
         $trackingTask = TrackingTask::has('subTasks')
             ->get()
             ->toArray();
@@ -236,10 +220,6 @@ class ComposhipsTest extends TestCase
 
     public function testHasWithBelongsToRelation()
     {
-        if (getLaravelVersion() <= 5.6 && getPHPVersion() >= 7.3) {
-            $this->markTestIncomplete('This test is broken on laravel 5.6 with PHP 7.3 and earlier!');
-        }
-
         $pickup_times = PickupTime::has('pickupPoint')
             ->get()
             ->toArray();
@@ -261,12 +241,25 @@ class ComposhipsTest extends TestCase
         $this->assertNotNull($allocation->user);
     }
 
+    public function testDissociateOnbelongsTo()
+    {
+        Model::unguard();
+
+        $user = new User();
+        $user->booking_id = 1;
+        $user->save();
+
+        $allocation = new Allocation();
+        $allocation->user()->associate($user);
+        $allocation->user()->dissociate();
+
+        $this->assertNull($allocation->user_id);
+        $this->assertNull($allocation->booking_id);
+        $this->assertNull($allocation->user);
+    }
+
     public function testHasOneOrManyFactoryRelationship()
     {
-        if (getLaravelVersion() < 8.0) {
-            $this->markTestIncomplete('This test is broken on laravel 7.x and earlier!');
-        }
-
         $allocation = Allocation::factory()
             ->has(TrackingTask::factory()->count(2)) // A Compoships relationship
             ->has(OriginalPackage::factory()->count(3)) // A standard relationship

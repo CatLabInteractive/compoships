@@ -80,13 +80,64 @@ use Illuminate\Database\Eloquent\Model;
 class B extends Model
 {
     use \Awobaz\Compoships\Compoships;
-    
+
     public function a()
     {
         return $this->belongsTo('A', ['foreignKey1', 'foreignKey2'], ['ownerKey1', 'ownerKey2']);
     }
 }
 ```
+
+We can also define many-to-many relationships with composite keys through a pivot table:
+
+```php
+namespace App;
+
+use Illuminate\Database\Eloquent\Model;
+
+class A extends Model
+{
+    use \Awobaz\Compoships\Compoships;
+
+    public function b()
+    {
+        return $this->belongsToMany(
+            B::class,
+            'a_b',                                  // pivot table
+            ['a_foreignKey1', 'a_foreignKey2'],     // foreign pivot keys for A
+            ['b_foreignKey1', 'b_foreignKey2'],     // foreign pivot keys for B
+            ['localKey1', 'localKey2'],             // local keys on A
+            ['localKey1', 'localKey2']              // local keys on B
+        );
+    }
+}
+```
+
+All standard `belongsToMany` operations work with composite keys: `attach()`, `detach()`, `sync()`, `toggle()`, `withPivot()`, `withTimestamps()`, eager loading, and existence queries (`has()`, `whereHas()`).
+
+#### Composite-key input shapes for `attach()` and `sync()`
+
+Two input shapes are supported for `attach()`, `sync()`, `syncWithoutDetaching()`, and `toggle()` on composite-key relations.
+
+A list of composite tuples (each tuple is an array aligned with the related-pivot-key columns):
+
+```php
+$team->projects()->attach([
+    ['EU', 2],
+    ['US', 1],
+]);
+```
+
+A map of `json_encode($tuple) => $perRowAttributes`, equivalent to Laravel's single-key `[id => attributes]` shape. The key must be the JSON encoding of the composite tuple, produced via `json_encode([...])`. Per-row attributes override any shared bulk attributes on key conflict, and any per-row attribute keys colliding with the foreign-pivot-key columns are silently dropped to prevent overriding the parent linkage.
+
+```php
+$team->projects()->attach([
+    json_encode(['EU', 2]) => ['role' => 'reviewer'],
+    json_encode(['US', 1]) => ['role' => 'lead'],
+], ['note' => 'bulk applied to all']);
+```
+
+Passing an associative array key that is not a JSON-encoded tuple of the correct arity throws `Awobaz\Compoships\Exceptions\InvalidUsageException`.
 
 ### Factories
 
@@ -132,30 +183,165 @@ use Illuminate\Database\Eloquent\Model;
 class Task extends Model
 {
     use \Awobaz\Compoships\Compoships;
-    
+
     public function user()
     {
         return $this->belongsTo(User::class, ['team_id', 'category_id'], ['team_id', 'category_id']);
     }
 }
 ```
+
+For a many-to-many scenario, imagine users can be assigned to projects, where both the user and the project are identified by a composite key (`team_id` and `department_id`):
+
+```php
+namespace App;
+
+use Illuminate\Database\Eloquent\Model;
+
+class User extends Model
+{
+    use \Awobaz\Compoships\Compoships;
+
+    public function projects()
+    {
+        return $this->belongsToMany(
+            Project::class,
+            'project_user',
+            ['user_team_id', 'user_department_id'],
+            ['project_team_id', 'project_department_id'],
+            ['team_id', 'department_id'],
+            ['team_id', 'department_id']
+        );
+    }
+}
+```
 ## Supported relationships
 
-**Compoships** only supports the following Laravel's Eloquent relationships:
+**Compoships** supports the following Laravel Eloquent relationships:
 
 * hasOne
-* HasMany
+* hasMany
 * belongsTo
+* belongsToMany
 
 Also please note that while **nullable columns are supported by Compoships**, relationships with only null values are not currently possible.
+
+**Note on `belongsToMany`:** Custom pivot models (via `using()`) with composite keys are supported. Your custom pivot class should extend `Awobaz\Compoships\Database\Eloquent\Relations\Pivot` instead of Laravel's base `Pivot` class to ensure correct behavior for save, delete, and queue operations.
+
+## Composite primary keys
+
+By default, Eloquent builds the WHERE clause for `UPDATE`, `DELETE`, and `refresh()` / `fresh()` using only the scalar `$primaryKey`. On tables whose primary key spans multiple columns (such as `(id, tenant_id)` in multi-tenant or partitioned schemas), `$model->save()` on a hydrated row emits a query like `UPDATE table SET ... WHERE id = ?`, missing the discriminator. The same scalar id can exist under another discriminator value, so the operation silently targets the wrong row.
+
+**Compoships** lets you opt into composite primary key handling on the write path. Declare a `$compositeKey` property on the model that enumerates every column in the primary key (including the scalar slot named by `$primaryKey`). Keep `$primaryKey` as the scalar column name so `getKey()`, `Model::find($id)`, route model binding, and queue serialization continue to work unchanged.
+
+```php
+namespace App;
+
+use Awobaz\Compoships\Compoships;
+use Illuminate\Database\Eloquent\Model;
+
+class TenantUser extends Model
+{
+    use Compoships;
+
+    protected $primaryKey = 'id';
+
+    public $incrementing = false;
+
+    protected $keyType = 'string';
+
+    protected $compositeKey = ['id', 'tenant_id'];
+
+    protected $guarded = [];
+}
+```
+
+With this declaration, the following operations scope their WHERE clause by every column in `$compositeKey`:
+
+* `save()` and `update()` on a hydrated model.
+* `delete()` (including soft deletes via `SoftDeletes::runSoftDelete()`).
+* `refresh()` and `fresh()`.
+
+For example:
+
+```php
+$user = TenantUser::where('id', 'u1')->where('tenant_id', 't1')->first();
+$user->name = 'Alice';
+$user->save();
+// UPDATE tenant_users SET name = ? WHERE id = ? AND tenant_id = ?
+```
+
+The following operations are **not** affected. They remain identical to stock Eloquent.
+
+* `Model::find($id)` looks up by the scalar primary key only.
+* `firstOrCreate`, `updateOrCreate`, and similar helpers build their own WHERE clauses from user input.
+* Route model binding by single id continues to use the scalar key.
+
+Queue serialization (via `Illuminate\Queue\SerializesModels`, used by queueable jobs, events, and notifications) participates in composite handling for **single-model** properties on the job: `getQueueableId()` returns a JSON-encoded array of the composite key columns, and `newQueryForRestoration()` decodes it back into a query that scopes by every key column on the worker side. Round-tripping a single composite-keyed model through the queue reloads the exact composite row that was queued. Old queued payloads predating this feature (with a scalar id) continue to restore via the parent path, so no queue drain is required on upgrade.
+
+**Collection round-trip requires the `QueueableCompositeCollection` wrapper.** A raw `Illuminate\Database\Eloquent\Collection` of composite-keyed models on a job property will restore as an empty collection. The cause is in Laravel's `restoreCollection`: it re-keys loaded models by scalar `getKey()` and looks up by the original queued ids (our JSON-encoded composite strings), so the lookup keys never match. The package ships a wrapper class that sidesteps the issue by capturing composite-key tuples at queue time and rebuilding the collection via composite-aware query at restore time:
+
+```php
+use Awobaz\Compoships\Queue\QueueableCompositeCollection;
+use Illuminate\Database\Eloquent\Collection;
+use Illuminate\Queue\SerializesModels;
+
+class ProcessUsers
+{
+    use SerializesModels;
+
+    public QueueableCompositeCollection $users;
+
+    public function __construct(Collection $users)
+    {
+        $this->users = QueueableCompositeCollection::for($users);
+    }
+
+    public function handle(): void
+    {
+        $users = $this->users->restore();
+        // ...
+    }
+}
+```
+
+The wrapper preserves the original collection order, eager-loaded relations, and the model's connection. It rejects mixed-class collections (throws `LogicException`) and misconfigured `$compositeKey` declarations (throws `InvalidUsageException`) at wrap time. The wrapper is opaque to `SerializesModels`, so PHP's standard serialization captures its state directly. Each call to `restore()` issues one database query.
+
+If you declare `$compositeKey` on a model whose array does not contain the value of `$primaryKey`, the trait throws `Awobaz\Compoships\Exceptions\InvalidUsageException` on the first save, delete, or refresh. The array must enumerate the whole primary key.
+
+If you mutate a discriminator column in memory before calling `save()` (for example, `$user->tenant_id = $newTenant`), the UPDATE still targets the row as it exists in storage. The WHERE clause uses the original raw value from `$model->original`, then the SET clause writes the new value.
+
+Nullable composite-key columns are supported. When the original raw value of a column is `null`, the trait emits `WHERE column IS NULL` rather than binding `null` into a `=` predicate (which SQL evaluates as never-true). This makes `$compositeKey` safe to use as a composite scoping key for tables that use a `UNIQUE(...)` index with a nullable discriminator rather than a strict composite primary key.
+
+#### Note for consumers with their own override
+
+If your model already overrides `setKeysForSaveQuery()` or `setKeysForSelectQuery()`, call `parent::setKeysForSaveQuery($query)` (and the select equivalent) first to inherit the composite key handling. Without `parent::`, the override loses the composite WHERE silently.
 
 ## Support for nullable columns in 2.x
 
 Version 2.x brings support for nullable columns. The results may now be different than on version 1.x when a column is null on a relationship, so we bumped the version to 2.x, as this might be a breaking change.
 
-## Disclaimer
+## Scope
 
-**Compoships** doesn't bring support for composite keys in Laravel's Eloquent. This package only offers the ability to specify relationships based on more than one column. In a Laravel project, it's recommended for all models' tables to have a single primary key. But there are situations where you'll need to match many columns in the definition of a relationship even when your models' tables have a single primary key.
+**Compoships** targets two specific gaps in Eloquent:
+
+1. Defining `hasOne`, `hasMany`, `belongsTo`, and `belongsToMany` relationships across multiple columns.
+2. Scoping the write path (`save`, `update`, `delete`, `refresh`, `fresh`) by every column of a composite primary key on models that opt in via `$compositeKey`.
+
+The package does not re-implement Laravel's primary-key handling end-to-end. The following continue to use the scalar `$primaryKey`:
+
+* `Model::find($id)` lookups.
+* Route model binding.
+
+Queue serialization (`Illuminate\Queue\SerializesModels`) is supported for composite-keyed models. See the "Composite primary keys" section for the round-trip contract.
+
+Builder-level bulk operations (`Model::query()->...->update(...)`) continue to use whatever WHERE clauses you build. For composite-key bulk patterns, the custom Query Builder's tuple `whereIn` works directly:
+
+```php
+Model::whereIn(['id', 'tenant_id'], [['u1', 't1'], ['u2', 't2']])->update(['name' => 'X']);
+```
+
+Most Laravel applications work best with a single scalar primary key. Compoships exists for the cases where the schema is not under your control (third-party databases, legacy systems, partitioned or multi-tenant tables) or where matching multiple columns in a relationship definition is unavoidable.
 
 ## Contributing
 
@@ -188,6 +374,23 @@ composer install
 Run PHPUnit
 ```bash
 ./vendor/bin/phpunit
+```
+
+### Running the full CI matrix locally
+
+The package is tested against multiple Laravel and PHP versions in CI. To reproduce that matrix on your machine without setting up each PHP version manually, use the bundled Docker runner:
+
+```bash
+./run-matrix-tests.sh
+```
+
+The script mirrors `.github/workflows/run-tests.yml` exactly. It iterates over every Laravel and PHP combination, installs the requested Laravel version with Composer inside an ephemeral Docker container, runs PHPUnit, and prints a pass/fail summary at the end. Docker is the only prerequisite.
+
+You can narrow the run to a subset by passing a filter argument that matches against the matrix label (`L<laravel> PHP<php>`):
+
+```bash
+./run-matrix-tests.sh "12.*"     # only Laravel 12 combinations
+./run-matrix-tests.sh "PHP8.4"   # only PHP 8.4 combinations
 ```
 
 ## Authors

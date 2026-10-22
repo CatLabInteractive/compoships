@@ -109,11 +109,9 @@ class HasManyTest extends TestCase
             return (array) $item;
         }, Capsule::table('tracking_tasks')->get()->all()));
 
-        if (getLaravelVersion() >= 8) {
-            $this->assertEquals(1, $allocation->smallerTrackingTask->id);
-            $this->assertEquals(1, $allocation->oldestTrackingTask->id);
-            $this->assertEquals(3, $allocation->latestTrackingTask->id);
-        }
+        $this->assertEquals(1, $allocation->smallerTrackingTask->id);
+        $this->assertEquals(1, $allocation->oldestTrackingTask->id);
+        $this->assertEquals(3, $allocation->latestTrackingTask->id);
     }
 
     public function test_Compoships_hasOneOrMany_create__empty()
@@ -203,6 +201,78 @@ class HasManyTest extends TestCase
         ], $trackingTask->toArray());
     }
 
+    public function test_Compoships_hasOneOrMany_upsert__single_record()
+    {
+        $allocation = $this->createAllocation(10, 20);
+
+        $allocation->trackingTasks()->upsert([
+            'id'         => 10,
+            'booking_id' => 999,
+            'vehicle_id' => 999,
+            'deleted_at' => null,
+        ], ['id'], ['deleted_at']);
+
+        $trackingTask = (array) Capsule::table('tracking_tasks')->where('id', 10)->first();
+
+        $this->assertEquals('10', $trackingTask['booking_id']);
+        $this->assertEquals('20', $trackingTask['vehicle_id']);
+        $this->assertNull($trackingTask['deleted_at']);
+    }
+
+    public function test_Compoships_hasOneOrMany_upsert__multiple_records_and_update()
+    {
+        $allocation = $this->createAllocation(10, 20);
+        Capsule::table('tracking_tasks')->insert([
+            'id'         => 20,
+            'booking_id' => 10,
+            'vehicle_id' => 20,
+            'created_at' => Carbon::now()->toDateTimeString(),
+            'updated_at' => Carbon::now()->toDateTimeString(),
+            'deleted_at' => null,
+        ]);
+
+        $allocation->trackingTasks()->upsert([
+            [
+                'id'         => 20,
+                'booking_id' => 999,
+                'vehicle_id' => 999,
+                'deleted_at' => Carbon::now()->addDay()->toDateTimeString(),
+            ],
+            [
+                'id'         => 21,
+                'booking_id' => 999,
+                'vehicle_id' => 999,
+                'deleted_at' => null,
+            ],
+        ], ['id'], ['booking_id', 'vehicle_id', 'deleted_at']);
+
+        $trackingTasks = Capsule::table('tracking_tasks')->orderBy('id')->get();
+
+        $this->assertCount(2, $trackingTasks);
+        $this->assertEquals('10', $trackingTasks[0]->booking_id);
+        $this->assertEquals('20', $trackingTasks[0]->vehicle_id);
+        $this->assertEquals(Carbon::now()->addDay()->toDateTimeString(), $trackingTasks[0]->deleted_at);
+        $this->assertEquals('10', $trackingTasks[1]->booking_id);
+        $this->assertEquals('20', $trackingTasks[1]->vehicle_id);
+        $this->assertNull($trackingTasks[1]->deleted_at);
+    }
+
+    public function test_Illuminate_hasOneOrMany_upsert__single_key_relation()
+    {
+        $allocation = $this->createAllocation();
+
+        $allocation->originalPackages()->upsert([
+            'id'            => 30,
+            'allocation_id' => 999,
+            'name'          => 'package',
+        ], ['id'], ['name']);
+
+        $package = (array) Capsule::table('original_packages')->where('id', 30)->first();
+
+        $this->assertEquals('1', $package['allocation_id']);
+        $this->assertEquals('package', $package['name']);
+    }
+
     /**
      * @covers \Awobaz\Compoships\Database\Query\Builder::whereIn
      */
@@ -246,15 +316,105 @@ class HasManyTest extends TestCase
         $this->assertCount(1, $allocations2);
         $this->assertCount(0, $allocations2[0]->trackingTasks);
 
-        if (getLaravelVersion() >= 8) {
-            $this->assertEquals(1, $allocations1[0]->smallerTrackingTask->id);
-            $this->assertEquals(1, $allocations1[0]->oldestTrackingTask->id);
-            $this->assertEquals(2, $allocations1[0]->latestTrackingTask->id);
+        $this->assertEquals(1, $allocations1[0]->smallerTrackingTask->id);
+        $this->assertEquals(1, $allocations1[0]->oldestTrackingTask->id);
+        $this->assertEquals(2, $allocations1[0]->latestTrackingTask->id);
 
-            $this->assertEquals(null, $allocations2[0]->smallerTrackingTask);
-            $this->assertEquals(null, $allocations2[0]->oldestTrackingTask);
-            $this->assertEquals(null, $allocations2[0]->latestTrackingTask);
-        }
+        $this->assertEquals(null, $allocations2[0]->smallerTrackingTask);
+        $this->assertEquals(null, $allocations2[0]->oldestTrackingTask);
+        $this->assertEquals(null, $allocations2[0]->latestTrackingTask);
+    }
+
+    /**
+     * @covers \Awobaz\Compoships\Database\Query\Builder::whereIn
+     */
+    public function test_Compoships_eagerLoading_using_expression()
+    {
+        $allocationId1 = Capsule::table('allocations')->insertGetId([
+            'booking_id' => 2,
+            'vehicle_id' => 2,
+        ]);
+        $allocationId2 = Capsule::table('allocations')->insertGetId([
+            'booking_id' => 1,
+            'vehicle_id' => 1,
+        ]);
+        Capsule::table('tracking_tasks')->insertGetId([
+            'booking_id' => 1,
+            'vehicle_id' => 1,
+            'created_at' => Carbon::now()
+                ->toDateTimeString(),
+            'updated_at' => Carbon::now()
+                ->toDateTimeString(),
+            'deleted_at' => null,
+        ]);
+
+        Capsule::connection()->enableQueryLog();
+        $allocations1 = Allocation::where('id', $allocationId1)->with('trackingTasksWithRaw')->get()->all();
+        $allocations2 = Allocation::where('id', $allocationId2)->with('trackingTasksWithRaw')->get()->all();
+        $queries = Capsule::connection()->getQueryLog();
+        Capsule::connection()->disableQueryLog();
+
+        $this->assertSame(
+            'select * from "tracking_tasks" where ("tracking_tasks"."booking_id", ("tracking_tasks" . "vehicle_id" /*test*/)) IN ((?, ?)) and "tracking_tasks"."deleted_at" is null',
+            last($queries)['query'],
+        );
+        $this->assertSame(
+            'select * from "tracking_tasks" where "tracking_tasks"."booking_id" = ? and ("tracking_tasks" . "vehicle_id" /*test*/) = ? and "tracking_tasks"."deleted_at" is null',
+            $allocations2[0]->trackingTasksWithRaw()->toSql(),
+        );
+
+        $this->assertCount(1, $allocations2);
+        $this->assertCount(1, $allocations2[0]->trackingTasks);
+        $this->assertEquals(1, $allocations2[0]->trackingTasks[0]->id);
+
+        $this->assertCount(1, $allocations1);
+        $this->assertCount(0, $allocations1[0]->trackingTasks);
+    }
+
+    /**
+     * @covers \Awobaz\Compoships\Database\Query\Builder::whereIn
+     */
+    public function test_Compoships_eagerLoading_using_prefixed_field()
+    {
+        $allocationId1 = Capsule::table('allocations')->insertGetId([
+            'booking_id' => 2,
+            'vehicle_id' => 2,
+        ]);
+        $allocationId2 = Capsule::table('allocations')->insertGetId([
+            'booking_id' => 1,
+            'vehicle_id' => 1,
+        ]);
+        Capsule::table('tracking_tasks')->insertGetId([
+            'booking_id' => 1,
+            'vehicle_id' => 1,
+            'created_at' => Carbon::now()
+                ->toDateTimeString(),
+            'updated_at' => Carbon::now()
+                ->toDateTimeString(),
+            'deleted_at' => null,
+        ]);
+
+        Capsule::connection()->enableQueryLog();
+        $allocations1 = Allocation::where('id', $allocationId1)->with('trackingTasksWithPrefixedField')->get()->all();
+        $allocations2 = Allocation::where('id', $allocationId2)->with('trackingTasksWithPrefixedField')->get()->all();
+        $queries = Capsule::connection()->getQueryLog();
+        Capsule::connection()->disableQueryLog();
+
+        $this->assertSame(
+            'select * from "tracking_tasks" where ("tracking_tasks"."booking_id", "tracking_tasks"."vehicle_id") IN ((?, ?)) and "tracking_tasks"."deleted_at" is null',
+            last($queries)['query'],
+        );
+        $this->assertSame(
+            'select * from "tracking_tasks" where "tracking_tasks"."booking_id" = ? and "tracking_tasks"."vehicle_id" = ? and "tracking_tasks"."deleted_at" is null',
+            $allocations2[0]->trackingTasksWithPrefixedField()->toSql(),
+        );
+
+        $this->assertCount(1, $allocations2);
+        $this->assertCount(1, $allocations2[0]->trackingTasks);
+        $this->assertEquals(1, $allocations2[0]->trackingTasks[0]->id);
+
+        $this->assertCount(1, $allocations1);
+        $this->assertCount(0, $allocations1[0]->trackingTasks);
     }
 
     /**
@@ -290,21 +450,15 @@ class HasManyTest extends TestCase
         $this->assertCount(1, $allocations2);
         $this->assertCount(0, $allocations2[0]->originalPackages);
 
-        if (getLaravelVersion() >= 8) {
-            $allocations1 = Allocation::where('id', $allocationId1)->with('originalPackagesOneOfMany')->get()->all();
-            $this->assertEquals(2, $allocations1[0]->originalPackagesOneOfMany->id);
+        $allocations1 = Allocation::where('id', $allocationId1)->with('originalPackagesOneOfMany')->get()->all();
+        $this->assertEquals(2, $allocations1[0]->originalPackagesOneOfMany->id);
 
-            $allocations2 = Allocation::where('id', $allocationId2)->with('originalPackagesOneOfMany')->get()->all();
-            $this->assertEquals(null, $allocations2[0]->originalPackagesOneOfMany);
-        }
+        $allocations2 = Allocation::where('id', $allocationId2)->with('originalPackagesOneOfMany')->get()->all();
+        $this->assertEquals(null, $allocations2[0]->originalPackagesOneOfMany);
     }
 
     public function test_Illuminate_chaperone()
     {
-        if (getLaravelVersion() < 11) {
-            $this->markTestSkipped('Only for Laravel versions above 11.');
-        }
-
         $allocationId1 = Capsule::table('allocations')->insertGetId([
             'booking_id' => 1,
             'vehicle_id' => 1,
