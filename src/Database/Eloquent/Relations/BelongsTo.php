@@ -76,6 +76,7 @@ class BelongsTo extends BaseBelongsTo
         foreach ($this->foreignKey as $key) {
             $this->child->setAttribute($key, null);
         }
+
         return $this->child->setRelation($this->relationName, null);
     }
 
