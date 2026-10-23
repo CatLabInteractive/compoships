@@ -2,6 +2,7 @@
 
 namespace Awobaz\Compoships\Database\Eloquent\Relations;
 
+use Awobaz\Compoships\Concerns\ResolvesBackedEnumValues;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Collection;
 use Illuminate\Database\Eloquent\Model;
@@ -9,6 +10,8 @@ use Illuminate\Database\Query\JoinClause;
 
 trait HasOneOrMany
 {
+    use ResolvesBackedEnumValues;
+
     /**
      * Set the base constraints on the relation query.
      *
@@ -21,9 +24,7 @@ trait HasOneOrMany
             $parentKeyValue = $this->getParentKey();
 
             $parentKeyValue = is_array($parentKeyValue)
-                ? array_map(function ($v) {
-                    return $v instanceof \BackedEnum ? $v->value : $v;
-                }, $parentKeyValue)
+                ? array_map(fn ($v) => $this->resolveBackedEnumValue($v), $parentKeyValue)
                 : $parentKeyValue;
 
             //If the foreign key is an array (multi-column relationship), we adjust the query.
@@ -31,10 +32,14 @@ trait HasOneOrMany
                 $allParentKeyValuesAreNull = array_unique($parentKeyValue) === [null];
 
                 foreach ($this->foreignKey as $index => $key) {
-                    $tmp = explode('.', $key);
-                    $key = end($tmp);
-                    $fullKey = $this->getRelated()
-                            ->getTable().'.'.$key;
+                    if (is_string($key)) {
+                        $tmp = explode('.', $key);
+                        $key = end($tmp);
+                        $fullKey = $this->getRelated()
+                                ->getTable().'.'.$key;
+                    } else {
+                        $fullKey = $key;
+                    }
                     $this->query->where($fullKey, '=', $parentKeyValue[$index]);
 
                     if ($allParentKeyValuesAreNull) {
@@ -53,9 +58,6 @@ trait HasOneOrMany
      * @param array $models
      *
      * @return void
-     *
-     * >=7.x - no method Illuminate\Database\Eloquent\Relations\Relation::getRelationQuery
-     * 10.x - no support array keys Illuminate\Database\Eloquent\Relations\Relation::whereInEager
      */
     public function addEagerConstraints(array $models)
     {
@@ -80,9 +82,6 @@ trait HasOneOrMany
      * @param string|array                        $key
      *
      * @return string
-     *
-     * 5.6 - no method \Awobaz\Compoships\Database\Eloquent\Relations\HasOneOrMany::whereInMethod
-     * added in this commit (5.7.17) https://github.com/illuminate/database/commit/9af300d1c50c9ec526823c1e6548daa3949bf9a9
      */
     protected function whereInMethod(Model $model, $key)
     {
@@ -90,10 +89,8 @@ trait HasOneOrMany
             return parent::whereInMethod($model, $key);
         }
 
-        $where = collect($key)->filter(function ($key) use ($model) {
-            return $model->getKeyName() === last(explode('.', $key))
-                && in_array($model->getKeyType(), ['int', 'integer']);
-        });
+        $where = collect($key)->filter(fn ($key) => $model->getKeyName() === last(explode('.', $key))
+            && in_array($model->getKeyType(), ['int', 'integer']));
 
         return $where->count() === count($key) ? 'whereIntegerInRaw' : 'whereIn';
     }
@@ -106,9 +103,7 @@ trait HasOneOrMany
     public function getQualifiedParentKeyName()
     {
         if (is_array($this->localKey)) { //Check for multi-columns relationship
-            return array_map(function ($k) {
-                return $this->parent->getTable().'.'.$k;
-            }, $this->localKey);
+            return array_map(fn ($k) => $this->parent->getTable().'.'.$k, $this->localKey);
         } else {
             return $this->parent->getTable().'.'.$this->localKey;
         }
@@ -124,16 +119,43 @@ trait HasOneOrMany
         $key = $this->getQualifiedForeignKeyName();
 
         if (is_array($key)) { //Check for multi-columns relationship
-            return array_map(function ($k) {
-                $segments = explode('.', $k);
+            $grammar = $this->getConnection()->getQueryGrammar();
 
-                return $segments[count($segments) - 1];
-            }, $key);
+            return array_map(fn ($k) => last(explode('.', $grammar->isExpression($k) ? $k->getValue($grammar) : $k)), $key);
         } else {
-            $segments = explode('.', $key);
-
-            return $segments[count($segments) - 1];
+            return last(explode('.', $key));
         }
+    }
+
+    /**
+     * Insert new records or update the existing ones.
+     *
+     * @param array        $values
+     * @param array|string $uniqueBy
+     * @param array|null   $update
+     *
+     * @return int
+     */
+    public function upsert(array $values, $uniqueBy, $update = null)
+    {
+        if (!is_array($this->foreignKey)) {
+            return parent::upsert($values, $uniqueBy, $update);
+        }
+
+        if (!empty($values) && !is_array(array_first($values))) {
+            $values = [$values];
+        }
+
+        $foreignKey = $this->getForeignKeyName();
+        $parentKeyValue = $this->getParentKey();
+
+        foreach ($values as $recordIndex => $value) {
+            foreach ($foreignKey as $keyIndex => $key) {
+                $values[$recordIndex][$key] = $parentKeyValue[$keyIndex];
+            }
+        }
+
+        return $this->getQuery()->upsert($values, $uniqueBy, $update);
     }
 
     /**
@@ -205,10 +227,9 @@ trait HasOneOrMany
             ->whereColumn(
                 $this->getQualifiedParentKeyName(),
                 '=',
-                is_array($this->getForeignKeyName()) ? //Check for multi-columns relationship
-                    array_map(function ($k) use ($hash) {
-                        return $hash.'.'.$k;
-                    }, $this->getForeignKeyName()) : $hash.'.'.$this->getForeignKeyName()
+                is_array($this->getForeignKeyName()) //Check for multi-columns relationship
+                    ? array_map(fn ($k) => $hash.'.'.$k, $this->getForeignKeyName())
+                    : $hash.'.'.$this->getForeignKeyName()
             );
     }
 
@@ -233,9 +254,9 @@ trait HasOneOrMany
             $key = $model->getAttribute($this->localKey);
             //If the foreign key is an array, we know it's a multi-column relationship
             //And we join the values to construct the dictionary key
-            $dictKey = is_array($key) ? implode('-', array_map(function ($v) {
-                return $v instanceof \BackedEnum ? $v->value : $v;
-            }, $key)) : $key;
+            $dictKey = is_array($key)
+                ? implode('-', array_map(fn ($v) => $this->resolveBackedEnumValue($v), $key))
+                : ($key ?? '');
 
             if (isset($dictionary[$dictKey])) {
                 $related = $this->getRelationValue($dictionary, $dictKey, $type);
@@ -274,13 +295,11 @@ trait HasOneOrMany
         foreach ($results as $result) {
             //If the foreign key is an array, we know it's a multi-column relationship...
             if (is_array($foreign)) {
-                $dictKeyValues = array_map(function ($k) use ($result) {
-                    return $result->{$k} instanceof \BackedEnum ? $result->{$k}->value : $result->{$k};
-                }, $foreign);
+                $dictKeyValues = array_map(fn ($k) => $this->resolveBackedEnumValue($result->{$k}), $foreign);
                 //... so we join the values to construct the dictionary key
                 $dictionary[implode('-', $dictKeyValues)][] = $result;
             } else {
-                $dictionary[$result->{$foreign}][] = $result;
+                $dictionary[$result->{$foreign} ?? ''][] = $result;
             }
         }
 

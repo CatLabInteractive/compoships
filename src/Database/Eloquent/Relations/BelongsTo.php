@@ -2,6 +2,7 @@
 
 namespace Awobaz\Compoships\Database\Eloquent\Relations;
 
+use Awobaz\Compoships\Concerns\ResolvesBackedEnumValues;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Collection;
 use Illuminate\Database\Eloquent\Model;
@@ -15,6 +16,8 @@ use Illuminate\Database\Eloquent\Relations\BelongsTo as BaseBelongsTo;
  */
 class BelongsTo extends BaseBelongsTo
 {
+    use ResolvesBackedEnumValues;
+
     /**
      * Get the results of the relationship.
      *
@@ -50,12 +53,11 @@ class BelongsTo extends BaseBelongsTo
             $value = $ownerKey[$i];
             $this->child->setAttribute($foreignKey, $value);
         }
-        // BC break in 5.8 : https://github.com/illuminate/database/commit/87b9833019f48b88d98a6afc46f38ce37f08237d
-        $relationName = property_exists($this, 'relationName') ? $this->relationName : $this->relation;
+        $relationName = $this->relationName;
         if ($model instanceof Model) {
             $this->child->setRelation($relationName, $model);
-        // proper unset // https://github.com/illuminate/database/commit/44411c7288fc7b7d4e5680cfcdaa46d348b5c981
         } elseif ($this->child->isDirty($this->foreignKey)) {
+            // proper unset // https://github.com/illuminate/database/commit/44411c7288fc7b7d4e5680cfcdaa46d348b5c981
             $this->child->unsetRelation($relationName);
         }
 
@@ -74,6 +76,7 @@ class BelongsTo extends BaseBelongsTo
         foreach ($this->foreignKey as $key) {
             $this->child->setAttribute($key, null);
         }
+
         return $this->child->setRelation($this->relationName, null);
     }
 
@@ -130,9 +133,6 @@ class BelongsTo extends BaseBelongsTo
                 $keys[] = $this->related->getTable().'.'.$key;
             }
 
-            // method \Awobaz\Compoships\Database\Eloquent\Relations\HasOneOrMany::whereInMethod
-            // 5.6 - does not exist
-            // 5.7 - added in 5.7.17 / https://github.com/illuminate/database/commit/9af300d1c50c9ec526823c1e6548daa3949bf9a9
             $this->query->whereIn($keys, $this->getEagerModelKeys($models));
         } else {
             parent::addEagerConstraints($models);
@@ -171,9 +171,7 @@ class BelongsTo extends BaseBelongsTo
         // to query for via the eager loading query. We will add them to an array then
         // execute a "where in" statement to gather up all of those related records.
         foreach ($models as $model) {
-            $keys[] = array_map(function ($k) use ($model) {
-                return $model->{$k};
-            }, $this->foreignKey);
+            $keys[] = array_map(fn ($k) => $model->{$k}, $this->foreignKey);
         }
 
         sort($keys);
@@ -189,9 +187,7 @@ class BelongsTo extends BaseBelongsTo
     public function getQualifiedForeignKey()
     {
         if (is_array($this->foreignKey)) { //Check for multi-columns relationship
-            return array_map(function ($k) {
-                return $this->child->getTable().'.'.$k;
-            }, $this->foreignKey);
+            return array_map(fn ($k) => $this->child->getTable().'.'.$k, $this->foreignKey);
         } else {
             return $this->child->getTable().'.'.$this->foreignKey;
         }
@@ -219,10 +215,9 @@ class BelongsTo extends BaseBelongsTo
             ->whereColumn(
                 $this->getQualifiedForeignKey(),
                 '=',
-                is_array($this->ownerKey) ? //Check for multi-columns relationship
-                    array_map(function ($k) use ($modelTable) {
-                        return $modelTable.'.'.$k;
-                    }, $this->ownerKey) : $modelTable.'.'.$this->ownerKey
+                is_array($this->ownerKey) //Check for multi-columns relationship
+                    ? array_map(fn ($k) => $modelTable.'.'.$k, $this->ownerKey)
+                    : $modelTable.'.'.$this->ownerKey
             );
     }
 
@@ -248,13 +243,11 @@ class BelongsTo extends BaseBelongsTo
 
         foreach ($results as $result) {
             if (is_array($owner)) { //Check for multi-columns relationship
-                $dictKeyValues = array_map(function ($k) use ($result) {
-                    return $result->{$k} instanceof \BackedEnum ? $result->{$k}->value : $result->{$k};
-                }, $owner);
+                $dictKeyValues = array_map(fn ($k) => $this->resolveBackedEnumValue($result->{$k}), $owner);
 
                 $dictionary[implode('-', $dictKeyValues)] = $result;
             } else {
-                $dictionary[$result->getAttribute($owner)] = $result;
+                $dictionary[$result->getAttribute($owner) ?? ''] = $result;
             }
         }
 
@@ -263,13 +256,11 @@ class BelongsTo extends BaseBelongsTo
         // the primary key of the children to map them onto the correct instances.
         foreach ($models as $model) {
             if (is_array($foreign)) { //Check for multi-columns relationship
-                $dictKeyValues = array_map(function ($k) use ($model) {
-                    return $model->{$k} instanceof \BackedEnum ? $model->{$k}->value : $model->{$k};
-                }, $foreign);
+                $dictKeyValues = array_map(fn ($k) => $this->resolveBackedEnumValue($model->{$k}), $foreign);
 
                 $key = implode('-', $dictKeyValues);
             } else {
-                $key = $model->{$foreign};
+                $key = $model->{$foreign} ?? '';
             }
 
             if (isset($dictionary[$key])) {
